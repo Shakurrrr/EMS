@@ -87,10 +87,27 @@ def fetch_and_update_employees():
     for name, image_url in rows:
         try:
             response = requests.get(image_url)
-            image_bytes = response.content
-            resized_img_np = resize_image_bytes(image_bytes)
-            face_locations = face_recognition.face_locations(resized_img_np)
-            face_encodings = face_recognition.face_encodings(resized_img_np, face_locations)
+
+            # Limit image size (1MB)
+            if len(response.content) > 1_000_000:
+                print(f"[WARNING] Skipping {name}: image too large.")
+                continue
+
+            # Load image from URL
+            image = Image.open(BytesIO(response.content)).convert('RGB')
+
+            # Resize if wider than 400px
+            if image.width > 400:
+                new_height = int(400 * (image.height / image.width))
+                image = image.resize((400, new_height))
+                print(f"[INFO] Resized image for {name} to 400px width.")
+
+            # Convert to numpy array
+            img_np = np.array(image)
+
+            # Encode
+            face_locations = face_recognition.face_locations(img_np)
+            face_encodings = face_recognition.face_encodings(img_np, face_locations)
 
             if face_encodings:
                 names.append(name)
@@ -98,15 +115,13 @@ def fetch_and_update_employees():
         except Exception as e:
             print(f"[ERROR] Failed to process image for {name}: {e}")
 
+    # Save to pickle
     known_face_encodings = encodings
     known_face_names = names
-
     with open(ENCODINGS_FILE, "wb") as f:
         pickle.dump({"encodings": known_face_encodings, "names": known_face_names}, f)
 
     print(f"[SYNC] Employee encodings updated: {len(names)} employees")
-
-# (Rest of the script remains unchanged... you can paste it below here if needed)
 
 
 def background_employee_sync():
