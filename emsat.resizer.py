@@ -25,7 +25,7 @@ POSTGRES_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT", 5432),
     "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASS"),
+    "password": os.getenv("DB_PASSWORD"),
     "dbname": os.getenv("DB_NAME")
 }
 
@@ -39,7 +39,6 @@ recent_logs = {}
 known_face_encodings = []
 known_face_names = []
 
-# Attendance Manager
 class AttendanceManager:
     def __init__(self):
         try:
@@ -59,16 +58,17 @@ class AttendanceManager:
             print("[SYNC] Skipped: DB offline")
             return
         try:
-            self.pg_cursor.execute("SELECT name, image_url FROM employees")
+            self.pg_cursor.execute("SELECT id, first_name, last_name, photo FROM employees")
             rows = self.pg_cursor.fetchall()
             names, encodings = [], []
-            for name, url in rows:
+            for emp_id, first_name, last_name, url in rows:
+                name = f"{first_name} {last_name}"
                 try:
+                    if not url:
+                        continue
                     img = Image.open(BytesIO(requests.get(url).content)).convert('RGB')
                     if img.width > 400:
                         img = img.resize((400, int(400 * img.height / img.width)))
-                    if BytesIO(img.tobytes()).tell() > 1_000_000:
-                        continue
                     arr = np.array(img)
                     locs = face_recognition.face_locations(arr)
                     encs = face_recognition.face_encodings(arr, locs)
@@ -91,8 +91,15 @@ class AttendanceManager:
             return
         try:
             df = pd.read_sql_query("""
-                SELECT name, employee_id, type, date, time, to_timestamp(timestamp) as datetime
-                FROM employee_attendance ORDER BY timestamp DESC
+                SELECT e.first_name || ' ' || e.last_name as name,
+                       ea.employee_id,
+                       ea.type,
+                       ea.date,
+                       ea.time,
+                       to_timestamp(ea.timestamp) as datetime
+                FROM employee_attendance ea
+                JOIN employees e ON ea.employee_id = e.id
+                ORDER BY ea.timestamp DESC
             """, self.pg_conn)
             df.to_excel(EXPORT_FILE, index=False)
             print(f"[EXPORT] Saved to {EXPORT_FILE}")
@@ -104,7 +111,10 @@ class AttendanceManager:
             print("[ATTENDANCE] DB offline; skipping")
             return False
         try:
-            self.pg_cursor.execute("SELECT employee_id FROM employees WHERE name=%s LIMIT 1", (name,))
+            self.pg_cursor.execute("""
+                SELECT id FROM employees 
+                WHERE CONCAT(first_name, ' ', last_name) = %s LIMIT 1
+            """, (name,))
             res = self.pg_cursor.fetchone()
             if not res:
                 return False
@@ -113,9 +123,9 @@ class AttendanceManager:
             if name in recent_logs and (now - recent_logs[name]).total_seconds() < 900:
                 return "duplicate"
             self.pg_cursor.execute("""
-                INSERT INTO employee_attendance (name, employee_id, type, date, time, timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (name, eid, log_type, now.date(), now.strftime("%H:%M:%S"), now.timestamp()))
+                INSERT INTO employee_attendance (employee_id, type, date, time, timestamp)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (eid, log_type, now.date(), now.strftime("%H:%M:%S"), now.timestamp()))
             recent_logs[name] = now
             return True
         except Exception as e:
@@ -141,11 +151,9 @@ picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
 picam2.start()
 
-# FSM
 def transition_to(state):
     print(f"[FSM] → {state}")
 
-# Face recognition
 def recognize_face(timeout=15):
     start = time.time()
     while time.time() - start < timeout:
@@ -163,7 +171,6 @@ def recognize_face(timeout=15):
                     return known_face_names[idx], round((1 - dists[idx]) * 100, 2)
     return None, None
 
-# LCD Message
 def display(lines, delay=0.3):
     lcd.clear()
     for line in lines:
@@ -178,7 +185,6 @@ def display(lines, delay=0.3):
                 time.sleep(delay)
             time.sleep(1)
 
-# Process attendance
 def handle_attendance(mgr, action):
     display(["Look at the camera"])
     name, confidence = recognize_face()
@@ -199,7 +205,6 @@ def handle_attendance(mgr, action):
         display(["Face not", "recognized"])
     time.sleep(2)
 
-# Main loop
 def main():
     mgr = AttendanceManager()
     scheduler = BackgroundScheduler()
