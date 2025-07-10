@@ -16,7 +16,7 @@ This project is part of a larger EMSATS platform (with FastAPI backend and React
 
 ---
 
-## 🧑‍💻 My Role
+## My Role
 - Lead Hardware Developer for EMSATS
 - Developed Raspberry Pi face recognition application
 - Integrated PostgreSQL attendance logging with offline-first fallback
@@ -25,8 +25,8 @@ This project is part of a larger EMSATS platform (with FastAPI backend and React
 
 ---
 
-## ⚙️ Technologies Used
-- Raspberry Pi 4 / Zero 2 W
+## Technologies Used
+- Raspberry Pi 4
 - PiCamera (with Picamera2)
 - Python 3.11
 - OpenCV + face_recognition
@@ -38,7 +38,7 @@ This project is part of a larger EMSATS platform (with FastAPI backend and React
 
 ---
 
-## 🧰 Requirements
+## Requirements
 - Python packages:
   - face_recognition
   - opencv-python
@@ -49,7 +49,7 @@ This project is part of a larger EMSATS platform (with FastAPI backend and React
   - RPLCD
   - picamera2
 
-## 🛠️ Setup
+##  Setup
 
 1. **Install Dependencies**
 ```bash
@@ -152,7 +152,7 @@ sudo systemctl enable emsats.service
 ## 🔐 Security Best Practices
 - Never hardcode credentials; use `.env`
 - Add `.env` to `.gitignore`
-- Distribute `.env.example` to teammates
+- Distributed `.env.example` to teammates
 
 ---
 
