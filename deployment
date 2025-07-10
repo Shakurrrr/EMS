@@ -6,7 +6,7 @@ After=network.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /home/pi/emsats/main.py
+ExecStart=/usr/bin/python3 /home/pi/emsats/emsats.resizer.py
 WorkingDirectory=/home/pi/emsats
 Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=/home/pi/emsats/.env
