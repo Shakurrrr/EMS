@@ -1,0 +1,21 @@
+# emsats.service - systemd unit file for boot-time deployment
+
+[Unit]
+Description=EMSATS Facial Recognition Attendance Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/emsats/main.py
+WorkingDirectory=/home/pi/emsats
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/home/pi/emsats/.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+User=pi
+Group=pi
+
+[Install]
+WantedBy=multi-user.target
