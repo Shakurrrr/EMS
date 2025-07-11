@@ -24,10 +24,9 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 POSTGRES_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT", 5432),
-    "username": os.getenv("DB_USERNAME"),
-    "database": os.getenv("DB_DATABASE"),
+    "user": os.getenv("DB_USERNAME"),
     "password": os.getenv("DB_PASSWORD"),
-    "dbconnection": os.getenv("DB_CONNECTION")
+    "dbname": os.getenv("DB_DATABASE"),
 }
 
 BASE_DIR = "/home/pi/Desktop/PROJECT/N-facial-recognition-QRCODE"
@@ -67,9 +66,20 @@ class AttendanceManager:
                 try:
                     if not url:
                         continue
-                    img = Image.open(BytesIO(requests.get(url).content)).convert('RGB')
-                    if img.width > 400:
-                        img = img.resize((400, int(400 * img.height / img.width)))
+                    response = requests.get(url)
+                    img = Image.open(BytesIO(response.content)).convert('RGB')
+
+                    # Resize if needed
+                    if img.width > 500:
+                        img = img.resize((500, int(500 * img.height / img.width)))
+
+                    # Compress in memory
+                    buffer = BytesIO()
+                    img.save(buffer, format='JPEG', quality=75)
+                    if buffer.tell() > 2_000_000:  # 2MB after compression
+                        print(f"[SKIPPED] {name}: Image still exceeds 2MB after compression")
+                        continue
+
                     arr = np.array(img)
                     locs = face_recognition.face_locations(arr)
                     encs = face_recognition.face_encodings(arr, locs)
