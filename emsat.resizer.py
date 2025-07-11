@@ -24,9 +24,10 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 POSTGRES_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT", 5432),
-    "user": os.getenv("DB_USER"),
+    "username": os.getenv("DB_USERNAME"),
+    "database": os.getenv("DB_DATABASE"),
     "password": os.getenv("DB_PASSWORD"),
-    "dbname": os.getenv("DB_NAME")
+    "dbconnection": os.getenv("DB_CONNECTION")
 }
 
 BASE_DIR = "/home/pi/Desktop/PROJECT/N-facial-recognition-QRCODE"
