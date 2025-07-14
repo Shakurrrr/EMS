@@ -39,7 +39,7 @@ recent_logs = {}
 known_face_encodings = []
 known_face_names = []
 
-## handling database attennddance
+## handling database attendance
 
 class AttendanceManager:
     def __init__(self):
@@ -145,7 +145,7 @@ class AttendanceManager:
             print(f"[ATTENDANCE ERROR] {e}")
             return False
 
-         ##   Calculated daily working hours    
+##   Calculated daily working hours    
 
     def calculate_hours(self, start_date, end_date):
         if not self.db_online:
