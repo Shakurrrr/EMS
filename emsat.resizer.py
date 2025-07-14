@@ -4,7 +4,7 @@ import pickle
 import threading
 import requests
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 import RPi.GPIO as GPIO
 import numpy as np
 import pandas as pd
@@ -39,6 +39,8 @@ recent_logs = {}
 known_face_encodings = []
 known_face_names = []
 
+## handling database attennddance
+
 class AttendanceManager:
     def __init__(self):
         try:
@@ -51,6 +53,8 @@ class AttendanceManager:
             self.pg_conn = None
             self.pg_cursor = None
             self.db_online = False
+
+## fetcing data from the database
 
     def fetch_and_update_employees(self):
         global known_face_encodings, known_face_names
@@ -69,14 +73,12 @@ class AttendanceManager:
                     response = requests.get(url)
                     img = Image.open(BytesIO(response.content)).convert('RGB')
 
-                    # Resize if needed
                     if img.width > 500:
                         img = img.resize((500, int(500 * img.height / img.width)))
 
-                    # Compress in memory
                     buffer = BytesIO()
                     img.save(buffer, format='JPEG', quality=75)
-                    if buffer.tell() > 2_000_000:  # 2MB after compression
+                    if buffer.tell() > 2_000_000:
                         print(f"[SKIPPED] {name}: Image still exceeds 2MB after compression")
                         continue
 
@@ -143,7 +145,73 @@ class AttendanceManager:
             print(f"[ATTENDANCE ERROR] {e}")
             return False
 
-# GPIO
+         ##   Calculated daily working hours    
+
+    def calculate_hours(self, start_date, end_date):
+        if not self.db_online:
+            return
+        try:
+            self.pg_cursor.execute("""
+                SELECT employee_id, type, timestamp, date FROM employee_attendance
+                WHERE date BETWEEN %s AND %s
+                ORDER BY employee_id, timestamp
+            """, (start_date, end_date))
+            rows = self.pg_cursor.fetchall()
+            work_hours = {}
+            for emp_id, typ, ts, dt in rows:
+                if emp_id not in work_hours:
+                    work_hours[emp_id] = []
+                work_hours[emp_id].append((typ, ts, dt))
+            summaries = []
+            for eid, logs in work_hours.items():
+                logs_by_day = {}
+                for typ, ts, dt in logs:
+                    logs_by_day.setdefault(dt, []).append((typ, ts))
+                total_seconds = 0
+                for day, entries in logs_by_day.items():
+                    check_in = None
+                    for typ, ts in entries:
+                        if typ == 'Check-In':
+                            check_in = ts
+                        elif typ == 'Check-Out' and check_in:
+                            total_seconds += ts - check_in
+                            check_in = None
+                summaries.append((eid, total_seconds))
+            return summaries
+        except Exception as e:
+            print(f"[HOURS ERROR] {e}")
+
+    ## updating weekly and monthly hours
+
+    def update_weekly_hours(self):
+        today = datetime.now().date()
+        start = today - timedelta(days=today.weekday())  # Monday
+        end = start + timedelta(days=6)  # Sunday
+        summary = self.calculate_hours(start, end)
+        if summary:
+            for emp_id, secs in summary:
+                self.pg_cursor.execute("""
+                    INSERT INTO weekly_logs (employee_id, week_start, total_hours)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (employee_id, week_start) DO UPDATE
+                    SET total_hours = EXCLUDED.total_hours
+                """, (emp_id, start, secs // 3600))
+
+    def update_monthly_hours(self):
+        today = datetime.now().date()
+        start = today.replace(day=1)
+        next_month = (start + timedelta(days=32)).replace(day=1)
+        end = next_month - timedelta(days=1)
+        summary = self.calculate_hours(start, end)
+        if summary:
+            for emp_id, secs in summary:
+                self.pg_cursor.execute("""
+                    INSERT INTO monthly_logs (employee_id, month_start, total_hours)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (employee_id, month_start) DO UPDATE
+                    SET total_hours = EXCLUDED.total_hours
+                """, (emp_id, start, secs // 3600))
+
 CHECK_IN_PIN = 22
 CHECK_OUT_PIN = 23
 GREEN_LED_PIN = 27
@@ -156,7 +224,6 @@ GPIO.setup(RED_LED_PIN, GPIO.OUT)
 GPIO.output(GREEN_LED_PIN, GPIO.LOW)
 GPIO.output(RED_LED_PIN, GPIO.LOW)
 
-# LCD + Camera
 lcd = CharLCD('PCF8574', 0x27)
 picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
@@ -216,10 +283,14 @@ def handle_attendance(mgr, action):
         display(["Face not", "recognized"])
     time.sleep(2)
 
+    ##system FSM
+
 def main():
     mgr = AttendanceManager()
     scheduler = BackgroundScheduler()
     scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=5)
+    scheduler.add_job(mgr.update_weekly_hours, 'cron', day_of_week='fri', hour=22, minute=0)
+    scheduler.add_job(mgr.update_monthly_hours, 'cron', day='last', hour=22, minute=0)
     scheduler.start()
 
     threading.Thread(target=mgr.fetch_and_update_employees, daemon=True).start()
