@@ -39,7 +39,7 @@ recent_logs = {}
 known_face_encodings = []
 known_face_names = []
 
-## handling database attendance
+## handling database attennddance
 
 class AttendanceManager:
     def __init__(self):
@@ -59,8 +59,17 @@ class AttendanceManager:
     def fetch_and_update_employees(self):
         global known_face_encodings, known_face_names
         if not self.db_online:
-            print("[SYNC] Skipped: DB offline")
-            return
+            print("[SYNC] DB offline: loading saved encodings...")
+        if os.path.exists(ENCODINGS_FILE):
+         with open(ENCODINGS_FILE, "rb") as f:
+            data = pickle.load(f)
+            known_face_encodings = data["encodings"]
+            known_face_names = data["names"]
+            print(f"[SYNC] Loaded {len(known_face_names)} faces from offline cache")
+        else:
+             print("[SYNC] No offline data available (encodings.pickle missing)")
+        return
+
         try:
             self.pg_cursor.execute("SELECT id, first_name, last_name, photo FROM employees")
             rows = self.pg_cursor.fetchall()
@@ -145,7 +154,7 @@ class AttendanceManager:
             print(f"[ATTENDANCE ERROR] {e}")
             return False
 
-##   Calculated daily working hours    
+         ##   Calculated daily working hours    
 
     def calculate_hours(self, start_date, end_date):
         if not self.db_online:
