@@ -30,7 +30,7 @@ POSTGRES_CONFIG = {
     "dbname": os.getenv("DB_DATABASE"),
 }
 
-BASE_DIR = "/home/pi/Desktop/PROJECT/N-facial-recognition-QRCODE"
+BASE_DIR = "/home/pi/Desktop/PROJECT/EMSAT_EMPLOYEE/ATS_PROJECT"
 ENCODINGS_FILE = os.path.join(BASE_DIR, "encodings.pickle")
 EXPORT_FILE = os.path.join(BASE_DIR, "exported_attendance.xlsx")
 OFFLINE_LOG_FILE = os.path.join(BASE_DIR, "offline_logs.json")
