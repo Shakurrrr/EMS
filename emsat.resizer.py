@@ -295,7 +295,7 @@ picam2.start()
 def transition_to(state):
     print(f"[FSM] → {state}")
 
-def recognize_face(timeout=15):
+def recognize_face(timeout=15, headless=False):
     start = time.time()
     while time.time() - start < timeout:
         frame = picam2.capture_array()
@@ -303,13 +303,26 @@ def recognize_face(timeout=15):
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         locs = face_recognition.face_locations(rgb)
         encs = face_recognition.face_encodings(rgb, locs)
+
+        if not headless:
+            for (top, right, bottom, left) in locs:
+                cv2.rectangle(resized, (left, top), (right, bottom), (0, 255, 0), 2)
+            cv2.imshow("Camera Preview", resized)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
         for enc in encs:
             matches = face_recognition.compare_faces(known_face_encodings, enc)
             dists = face_recognition.face_distance(known_face_encodings, enc)
             if matches and dists.size > 0:
                 idx = np.argmin(dists)
                 if matches[idx]:
+                    if not headless:
+                        cv2.destroyAllWindows()
                     return known_face_names[idx], round((1 - dists[idx]) * 100, 2)
+
+    if not headless:
+        cv2.destroyAllWindows()
     return None, None
 
 def display(lines, delay=0.3):
@@ -326,9 +339,9 @@ def display(lines, delay=0.3):
                 time.sleep(delay)
             time.sleep(1)
 
-def handle_attendance(mgr, action):
+def handle_attendance(mgr, action, headless=False):
     display(["Look at the camera"])
-    name, confidence = recognize_face()
+    name, confidence = recognize_face(headless=headless)
     if name:
         display([f"Detected: {name}", f"Match: {confidence}%"])
         time.sleep(1.5)
@@ -379,3 +392,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
