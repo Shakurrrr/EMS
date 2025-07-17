@@ -58,7 +58,8 @@ class AttendanceManager:
                 self.db_online = True
                 print("[DB INIT] Connected to PostgreSQL")
                 self.sync_offline_logs()
-                display(["DB Connected", "Synced logs"])
+                display(["DB CONNECTED", "SYNCED LOGS"])
+                time.sleep(3)
         except Exception as e:
             if self.db_online:
                 print(f"[DB ERROR] Lost connection: {e}")
@@ -136,9 +137,9 @@ class AttendanceManager:
                 if res:
                     eid = res[0]
                     self.pg_cursor.execute("""
-                        INSERT INTO employee_attendance (employee_id, type, date, time, timestamp)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (eid, log["type"], log["date"], log["time"], log["timestamp"]))
+                        INSERT INTO attendances (employee_id, type, attendance_date, time, timestamp, synced)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (eid, log["type"], log["date"], log["time"], log["timestamp"], True))
             os.remove(OFFLINE_LOG_FILE)
             print("[SYNC] Offline logs successfully synced")
         except Exception as e:
@@ -151,7 +152,7 @@ class AttendanceManager:
 
         if not self.db_online:
             print("[ATTENDANCE] DB offline; queuing log")
-            display(["DB Offline:", "Queued"])
+            display(["DB OFFLINE:", "QUEUED"])
             offline_log = {
                 "name": name,
                 "type": log_type,
@@ -180,15 +181,31 @@ class AttendanceManager:
             if not res:
                 return False
             eid = res[0]
-            self.pg_cursor.execute("""
-                INSERT INTO employee_attendance (employee_id, type, date, time, timestamp)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (eid, log_type, now.date(), now.strftime("%H:%M:%S"), now.timestamp()))
+
+            if log_type == "Check-In":
+                self.pg_cursor.execute("""
+                    INSERT INTO attendances (employee_id, attendance_date, clock_in, method, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW(), NOW())
+                """, (eid, now.date(), now.strftime("%H:%M:%S"), log_type))
+
+            elif log_type == "Check-Out":
+                self.pg_cursor.execute("""
+                    UPDATE attendances
+                    SET clock_out = %s,
+                        total_hours = EXTRACT(EPOCH FROM (%s::time - clock_in)) / 3600.0,
+                        updated_at = NOW(),
+                        method = %s
+                    WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
+                """, (now.strftime("%H:%M:%S"), now.strftime("%H:%M:%S"), log_type, eid, now.date()))
+
+            self.pg_conn.commit()
             recent_logs[name] = now
             return True
+
         except Exception as e:
             print(f"[ATTENDANCE ERROR] {e}")
             return False
+
 
     def export_attendance(self):
         if not self.db_online:
@@ -197,53 +214,52 @@ class AttendanceManager:
         try:
             df = pd.read_sql_query("""
                 SELECT e.first_name || ' ' || e.last_name as name,
-                       ea.employee_id,
-                       ea.type,
-                       ea.date,
-                       ea.time,
-                       to_timestamp(ea.timestamp) as datetime
-                FROM employee_attendance ea
-                JOIN employees e ON ea.employee_id = e.id
-                ORDER BY ea.timestamp DESC
+                       a.employee_id,
+                       a.type,
+                       a.attendance_date as date,
+                       a.time,
+                       to_timestamp(a.timestamp) as datetime
+                FROM attendances a
+                JOIN employees e ON a.employee_id = e.id
+                ORDER BY a.timestamp DESC
             """, self.pg_conn)
             df.to_excel(EXPORT_FILE, index=False)
             print(f"[EXPORT] Saved to {EXPORT_FILE}")
         except Exception as e:
             print(f"[EXPORT ERROR] {e}")
 
+
     def calculate_hours(self, start_date, end_date):
         if not self.db_online:
             return
         try:
             self.pg_cursor.execute("""
-                SELECT employee_id, type, timestamp, date FROM employee_attendance
-                WHERE date BETWEEN %s AND %s
-                ORDER BY employee_id, timestamp
+                SELECT employee_id, clock_in, clock_out, attendance_date 
+                FROM attendances
+                WHERE attendance_date BETWEEN %s AND %s
+                ORDER BY employee_id, attendance_date
             """, (start_date, end_date))
             rows = self.pg_cursor.fetchall()
             work_hours = {}
-            for emp_id, typ, ts, dt in rows:
+            for emp_id, clock_in, clock_out, dt in rows:
                 if emp_id not in work_hours:
                     work_hours[emp_id] = []
-                work_hours[emp_id].append((typ, ts, dt))
+                work_hours[emp_id].append((clock_in, clock_out, dt))
             summaries = []
             for eid, logs in work_hours.items():
                 logs_by_day = {}
-                for typ, ts, dt in logs:
-                    logs_by_day.setdefault(dt, []).append((typ, ts))
+                for clock_in, clock_out, dt in logs:
+                    logs_by_day.setdefault(dt, []).append((clock_in, clock_out))
                 total_seconds = 0
                 for day, entries in logs_by_day.items():
-                    check_in = None
-                    for typ, ts in entries:
-                        if typ == 'Check-In':
-                            check_in = ts
-                        elif typ == 'Check-Out' and check_in:
-                            total_seconds += ts - check_in
-                            check_in = None
+                    for clock_in, clock_out in entries:
+                        if clock_in and clock_out:
+                            total_seconds += clock_out - clock_in
                 summaries.append((eid, total_seconds))
             return summaries
         except Exception as e:
             print(f"[HOURS ERROR] {e}")
+
 
     def update_weekly_hours(self):
         today = datetime.now().date()
@@ -252,12 +268,14 @@ class AttendanceManager:
         summary = self.calculate_hours(start, end)
         if summary:
             for emp_id, secs in summary:
+                week_number = start.isocalendar()[1]
+                year = start.year
                 self.pg_cursor.execute("""
-                    INSERT INTO weekly_logs (employee_id, week_start, total_hours)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (employee_id, week_start) DO UPDATE
-                    SET total_hours = EXCLUDED.total_hours
-                """, (emp_id, start, secs // 3600))
+                    INSERT INTO weekly_attendance_logs (employee_id, week, year, total_minutes)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (employee_id, week, year) DO UPDATE
+                    SET total_minutes = EXCLUDED.total_minutes
+                """, (emp_id, week_number, year, secs // 60))
 
     def update_monthly_hours(self):
         today = datetime.now().date()
@@ -267,13 +285,14 @@ class AttendanceManager:
         summary = self.calculate_hours(start, end)
         if summary:
             for emp_id, secs in summary:
-                self.pg_cursor.execute("""
-                    INSERT INTO monthly_logs (employee_id, month_start, total_hours)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (employee_id, month_start) DO UPDATE
-                    SET total_hours = EXCLUDED.total_hours
-                """, (emp_id, start, secs // 3600))
-
+               month = start.month
+               year = start.year
+               self.pg_cursor.execute("""
+                  INSERT INTO monthly_attendance_logs (employee_id, month, year, total_minutes)
+                  VALUES (%s, %s, %s, %s)
+                  ON CONFLICT (employee_id, month, year) DO UPDATE
+                  SET total_minutes = EXCLUDED.total_minutes
+               """, (emp_id, month, year, secs // 60))
 
 CHECK_IN_PIN = 22
 CHECK_OUT_PIN = 23
@@ -340,23 +359,23 @@ def display(lines, delay=0.3):
             time.sleep(1)
 
 def handle_attendance(mgr, action, headless=False):
-    display(["Look at the camera"])
+    display(["LOOK AT THE CAMERA"])
     name, confidence = recognize_face(headless=headless)
     if name:
-        display([f"Detected: {name}", f"Match: {confidence}%"])
+        display([f"DETECTED: {name}", f"MATCH: {confidence}%"])
         time.sleep(1.5)
         result = mgr.log_attendance(name, action)
         if result == "duplicate":
-            display(["Already", f"Checked {action}".lower()])
+            display(["ALREADY", f"CHECKED {action}".lower()])
         elif result:
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.HIGH)
             display([f"{name.split()[0]} {action}", "Success!"])
             time.sleep(3)
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.LOW)
         else:
-            display(["User not", "recognized"])
+            display(["USER NOT", "RECOGNIZED"])
     else:
-        display(["Face not", "recognized"])
+        display(["FACE NOT", "RECOGNIZED"])
     time.sleep(2)
 
     ##system FSM
@@ -371,7 +390,7 @@ def main():
 
     threading.Thread(target=mgr.fetch_and_update_employees, daemon=True).start()
 
-    display(["System Ready", "Press Button"])
+    display(["SYSTEM READY", "PRESS BUTTON"])
     transition_to("IDLE")
     try:
         while True:
