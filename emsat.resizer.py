@@ -378,6 +378,10 @@ def handle_attendance(mgr, action, headless=False):
         display(["FACE NOT", "RECOGNIZED"])
     time.sleep(2)
 
+    display(["SYSTEM READY", "PRESS BUTTON"])
+    transition_to("IDLE")
+
+    
     ##system FSM
 
 def main():
