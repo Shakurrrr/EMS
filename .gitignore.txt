@@ -1,4 +1,4 @@
 # ignore all text file
-
+* .env
 *.txt
 *.py
