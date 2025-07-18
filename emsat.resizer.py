@@ -312,7 +312,7 @@ picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888',
 picam2.start()
 
 def transition_to(state):
-    print(f"[FSM] → {state}")
+    print(f"[FSM] â†’ {state}")
 
 def recognize_face(timeout=15, headless=False):
     start = time.time()
@@ -357,6 +357,18 @@ def display(lines, delay=0.3):
                 lcd.crlf()
                 time.sleep(delay)
             time.sleep(1)
+            
+def get_greeting_lines():
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return ["GOOD MORNING!", "PRESS TO LOG"]
+    elif 12 <= hour < 17:
+        return ["GOOD AFTERNOON", "PRESS TO LOG"]
+    elif 17 <= hour < 21:
+        return ["GOOD EVENING!", "PRESS TO LOG"]
+    else:
+        return ["WELCOME BACK!", "PRESS TO LOG"]
+                    
 
 def handle_attendance(mgr, action, headless=False):
     display(["LOOK AT THE CAMERA"])
@@ -378,7 +390,7 @@ def handle_attendance(mgr, action, headless=False):
         display(["FACE NOT", "RECOGNIZED"])
     time.sleep(2)
 
-    display(["SYSTEM READY", "PRESS BUTTON"])
+    display(get_greeting_lines())
     transition_to("IDLE")
 
     
@@ -394,7 +406,7 @@ def main():
 
     threading.Thread(target=mgr.fetch_and_update_employees, daemon=True).start()
 
-    display(["SYSTEM READY", "PRESS BUTTON"])
+    display(get_greeting_lines())
     transition_to("IDLE")
     try:
         while True:
@@ -415,4 +427,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
