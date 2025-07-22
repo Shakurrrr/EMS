@@ -157,7 +157,7 @@ class AttendanceManager:
                 "name": name,
                 "type": log_type,
                 "date": str(now.date()),
-                "time": now.strftime("%H:%M:%S"),
+                "time": now.time(),
                 "timestamp": now.timestamp()
             }
             try:
@@ -181,12 +181,12 @@ class AttendanceManager:
             if not res:
                 return False
             eid = res[0]
-
+            method_used = "facial_recognition"
             if log_type == "Check-In":
                 self.pg_cursor.execute("""
                     INSERT INTO attendances (employee_id, attendance_date, clock_in, method, created_at, updated_at)
                     VALUES (%s, %s, %s, %s, NOW(), NOW())
-                """, (eid, now.date(), now.strftime("%H:%M:%S"), log_type))
+                """, (eid, now.date(), now.time(), method_used))
 
             elif log_type == "Check-Out":
                 self.pg_cursor.execute("""
@@ -196,7 +196,7 @@ class AttendanceManager:
                         updated_at = NOW(),
                         method = %s
                     WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
-                """, (now.strftime("%H:%M:%S"), now.strftime("%H:%M:%S"), log_type, eid, now.date()))
+                """, (now.strftime("%H:%M:%S"), now.time(), method_used, eid, now.date()))
 
             self.pg_conn.commit()
             recent_logs[name] = now
@@ -363,7 +363,7 @@ def get_greeting_lines():
     if 5 <= hour < 12:
         return ["GOOD MORNING!", "PRESS TO LOG"]
     elif 12 <= hour < 17:
-        return ["GOOD AFTERNOON", "PRESS TO LOG"]
+        return ["GOOD AFTERNOON!", "PRESS TO LOG"]
     elif 17 <= hour < 21:
         return ["GOOD EVENING!", "PRESS TO LOG"]
     else:
