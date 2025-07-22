@@ -102,12 +102,13 @@ class AttendanceManager:
 
                     buffer = BytesIO()
                     img.save(buffer, format='JPEG', quality=75)
-                    if buffer.tell() > 2_000_000:
-                        print(f"[SKIPPED] {name}: Image still exceeds 2MB after compression")
+                    if buffer.tell() > 3_000_000:
+                        print(f"[SKIPPED] {name}: Image still exceeds 3MB after compression")
                         continue
 
                     arr = np.array(img)
                     locs = face_recognition.face_locations(arr)
+                    print(f"[DEBUG] Processing {name}, URL: {url}, Face locations: {locs}")
                     encs = face_recognition.face_encodings(arr, locs)
                     if encs:
                         names.append(name)
@@ -157,7 +158,7 @@ class AttendanceManager:
                 "name": name,
                 "type": log_type,
                 "date": str(now.date()),
-                "time": now.time(),
+                "time": now.strftime("%H:%M:%S"),
                 "timestamp": now.timestamp()
             }
             try:
@@ -181,22 +182,28 @@ class AttendanceManager:
             if not res:
                 return False
             eid = res[0]
+            
             method_used = "facial_recognition"
             if log_type == "Check-In":
+                clock_in_time = now.strftime("%H:%M:%S")
                 self.pg_cursor.execute("""
                     INSERT INTO attendances (employee_id, attendance_date, clock_in, method, created_at, updated_at)
                     VALUES (%s, %s, %s, %s, NOW(), NOW())
-                """, (eid, now.date(), now.time(), method_used))
+                """, (eid, now.date(), clock_in_time, method_used))
 
             elif log_type == "Check-Out":
+                print(f"Attempting to clock OUT for {eid} on {now.date()}")
+
                 self.pg_cursor.execute("""
                     UPDATE attendances
                     SET clock_out = %s,
-                        total_hours = EXTRACT(EPOCH FROM (%s::time - clock_in)) / 3600.0,
+                        total_hours = EXTRACT(EPOCH FROM (clock_out::timestamp - clock_in::timestamp))
+ / 3600.0,
                         updated_at = NOW(),
                         method = %s
                     WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
-                """, (now.strftime("%H:%M:%S"), now.time(), method_used, eid, now.date()))
+                """, (now.time(), now.time(), method_used, eid, now.date()))
+                print("[?] Clock-out query executed")
 
             self.pg_conn.commit()
             recent_logs[name] = now
@@ -227,6 +234,7 @@ class AttendanceManager:
             print(f"[EXPORT] Saved to {EXPORT_FILE}")
         except Exception as e:
             print(f"[EXPORT ERROR] {e}")
+
 
 
     def calculate_hours(self, start_date, end_date):
@@ -312,9 +320,9 @@ picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888',
 picam2.start()
 
 def transition_to(state):
-    print(f"[FSM] â†’ {state}")
+    print(f"[FSM] → {state}")
 
-def recognize_face(timeout=15, headless=False):
+def recognize_face(timeout=15, headless=True):
     start = time.time()
     while time.time() - start < timeout:
         frame = picam2.capture_array()
@@ -358,30 +366,31 @@ def display(lines, delay=0.3):
                 time.sleep(delay)
             time.sleep(1)
             
+            
 def get_greeting_lines():
     hour = datetime.now().hour
     if 5 <= hour < 12:
         return ["GOOD MORNING!", "PRESS TO LOG"]
     elif 12 <= hour < 17:
-        return ["GOOD AFTERNOON!", "PRESS TO LOG"]
+        return ["GOOD AFTERNOON", "PRESS TO LOG"]
     elif 17 <= hour < 21:
         return ["GOOD EVENING!", "PRESS TO LOG"]
     else:
         return ["WELCOME BACK!", "PRESS TO LOG"]
                     
 
-def handle_attendance(mgr, action, headless=False):
+def handle_attendance(mgr, action, headless=True):
     display(["LOOK AT THE CAMERA"])
     name, confidence = recognize_face(headless=headless)
     if name:
-        display([f"DETECTED: {name}", f"MATCH: {confidence}%"])
+        display([f"DETECTED: {name.upper()}", f"MATCH: {confidence}%"])
         time.sleep(1.5)
         result = mgr.log_attendance(name, action)
         if result == "duplicate":
-            display(["ALREADY", f"CHECKED {action}".lower()])
+            display(["ALREADY", f"CHECKED {action}".upper()])
         elif result:
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.HIGH)
-            display([f"{name.split()[0]} {action}", "Success!"])
+            display([f"{name.split()[0]} {action.upper()}", "SUCCESS!"])
             time.sleep(3)
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.LOW)
         else:
@@ -399,7 +408,7 @@ def handle_attendance(mgr, action, headless=False):
 def main():
     mgr = AttendanceManager()
     scheduler = BackgroundScheduler()
-    scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=5)
+    scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=2)
     scheduler.add_job(mgr.update_weekly_hours, 'cron', day_of_week='fri', hour=22, minute=0)
     scheduler.add_job(mgr.update_monthly_hours, 'cron', day='last', hour=22, minute=0)
     scheduler.start()
@@ -427,5 +436,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
