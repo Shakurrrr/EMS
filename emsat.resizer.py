@@ -185,14 +185,14 @@ class AttendanceManager:
             
             method_used = "facial_recognition"
             if log_type == "Check-In":
-                clock_in_time = now.strftime("%H:%M:%S")
+                clock_in_time = datetime.utcnow()
                 self.pg_cursor.execute("""
                     INSERT INTO attendances (employee_id, attendance_date, clock_in, method, created_at, updated_at)
                     VALUES (%s, %s, %s, %s, NOW(), NOW())
                 """, (eid, now.date(), clock_in_time, method_used))
 
             elif log_type == "Check-Out":
-                print(f"Attempting to clock OUT for {eid} on {now.date()}")
+                print(f"[INFO] Attempting Check-Out for {name}")
 
                 self.pg_cursor.execute("""
                     UPDATE attendances
@@ -203,11 +203,16 @@ class AttendanceManager:
                         method = %s
                     WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
                 """, (now.time(), now.time(), method_used, eid, now.date()))
-                print("[?] Clock-out query executed")
+                print(f"[DEBUG] UPDATE ROWS AFFECTED: {self.pg_cursor.rowcount}")
+                if self.pg_cursor.rowcount == 0:
+                    print("[ATTENDANCE] No open check-in found; clock-out failed.")
+                    display(["NO ACTIVE", "CHECK-IN FOUND"])
+                    return False
 
-            self.pg_conn.commit()
             recent_logs[name] = now
+            print(f"[LOGGED] {log_type} for {name}")
             return True
+
 
         except Exception as e:
             print(f"[ATTENDANCE ERROR] {e}")
@@ -390,7 +395,7 @@ def handle_attendance(mgr, action, headless=True):
             display(["ALREADY", f"CHECKED {action}".upper()])
         elif result:
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.HIGH)
-            display([f"{name.split()[0]} {action.upper()}", "SUCCESS!"])
+            display([f"{name.split()[0].upper()} {action.upper()}", "SUCCESS!"])
             time.sleep(3)
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.LOW)
         else:
@@ -436,3 +441,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
