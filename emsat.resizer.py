@@ -51,6 +51,14 @@ class AttendanceManager:
 
     def check_db_connection(self):
         try:
+            if self.pg_cursor:
+                self.pg_cursor.close()
+            if self.pg_conn:
+                self.pg_conn.close()
+        except Exception:
+            pass  # Ignore errors if already closed
+    
+        try:
             self.pg_conn = psycopg2.connect(**POSTGRES_CONFIG)
             self.pg_conn.autocommit = True
             self.pg_cursor = self.pg_conn.cursor()
@@ -176,10 +184,12 @@ class AttendanceManager:
         try:
             self.pg_cursor.execute("""
                 SELECT id FROM employees 
-                WHERE CONCAT(first_name, ' ', last_name) = %s LIMIT 1
+                WHERE LOWER(CONCAT(first_name, ' ', last_name)) = LOWER(%s)
+
             """, (name,))
             res = self.pg_cursor.fetchone()
             if not res:
+                print(f"[ERROR] No matching employee found for name: {name}")
                 return False
             eid = res[0]
             
@@ -193,25 +203,43 @@ class AttendanceManager:
 
             elif log_type == "Check-Out":
                 print(f"[INFO] Attempting Check-Out for {name}")
+                clock_out_time = datetime.utcnow()
+                
+                # Ensure there is a record to update
+                self.pg_cursor.execute("""
+                    SELECT id FROM attendances 
+                    WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
+                    ORDER BY id DESC LIMIT 1
+                """, (eid, now.date()))
+                open_record = self.pg_cursor.fetchone()
+                if not open_record:
+                    print("[ATTENDANCE] No open check-in found; clock-out failed.")
+                    display(["NO ACTIVE", "CHECK-IN FOUND"])
+                    return False
+                print(f"[DEBUG] Targeting attendance ID {open_record[0]} for Check-Out")
+
 
                 self.pg_cursor.execute("""
                     UPDATE attendances
                     SET clock_out = %s,
-                        total_hours = EXTRACT(EPOCH FROM (clock_out::timestamp - clock_in::timestamp))
- / 3600.0,
-                        updated_at = NOW(),
-                        method = %s
+                        total_hours = EXTRACT(EPOCH FROM (%s - clock_in)) / 3600.0,
+                        updated_at = NOW()
                     WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
-                """, (now.time(), now.time(), method_used, eid, now.date()))
+                """, (clock_out_time, clock_out_time, eid, now.date()))
+                print(f"Rows updated for clock_out: {self.pg_cursor.rowcount}")
                 print(f"[DEBUG] UPDATE ROWS AFFECTED: {self.pg_cursor.rowcount}")
+                
                 if self.pg_cursor.rowcount == 0:
                     print("[ATTENDANCE] No open check-in found; clock-out failed.")
                     display(["NO ACTIVE", "CHECK-IN FOUND"])
                     return False
-
+                
+            print(f"[LOGGED] {log_type} for {name} (employee_id={eid})")
             recent_logs[name] = now
-            print(f"[LOGGED] {log_type} for {name}")
             return True
+        
+            print("[ERROR] Unknown log_type passed.")
+            return False
 
 
         except Exception as e:
@@ -377,7 +405,7 @@ def get_greeting_lines():
     if 5 <= hour < 12:
         return ["GOOD MORNING!", "PRESS TO LOG"]
     elif 12 <= hour < 17:
-        return ["GOOD AFTERNOON", "PRESS TO LOG"]
+        return ["GOOD AFTERNOON!", "PRESS TO LOG"]
     elif 17 <= hour < 21:
         return ["GOOD EVENING!", "PRESS TO LOG"]
     else:
@@ -385,6 +413,7 @@ def get_greeting_lines():
                     
 
 def handle_attendance(mgr, action, headless=True):
+    print(f"[DEBUG] Button triggered action: {action}")
     display(["LOOK AT THE CAMERA"])
     name, confidence = recognize_face(headless=headless)
     if name:
@@ -395,6 +424,9 @@ def handle_attendance(mgr, action, headless=True):
             display(["ALREADY", f"CHECKED {action}".upper()])
         elif result:
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.HIGH)
+            print(f"[LED] Lighting up {'GREEN' if action == 'Check-In' else 'RED'} for {action}")
+            
+            
             display([f"{name.split()[0].upper()} {action.upper()}", "SUCCESS!"])
             time.sleep(3)
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.LOW)
@@ -429,6 +461,7 @@ def main():
                 handle_attendance(mgr, "Check-In")
                 transition_to("IDLE")
             elif GPIO.input(CHECK_OUT_PIN) == GPIO.LOW:
+                print("Check-Out button pressed")
                 transition_to("RECOGNIZING")
                 handle_attendance(mgr, "Check-Out")
                 transition_to("IDLE")
@@ -441,4 +474,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
