@@ -71,6 +71,7 @@ class AttendanceManager:
         except Exception as e:
             if self.db_online:
                 print(f"[DB ERROR] Lost connection: {e}")
+                dsplay(["DB OFFLINE", "LOG QUEUED"])
             self.db_online = False
 
     def retry_connection_loop(self):
@@ -156,8 +157,6 @@ class AttendanceManager:
 
     def log_attendance(self, name, log_type):
         now = datetime.now()
-        if name in recent_logs and (now - recent_logs[name]).total_seconds() < 30:
-            return "duplicate"
 
         if not self.db_online:
             print("[ATTENDANCE] DB offline; queuing log")
@@ -195,17 +194,35 @@ class AttendanceManager:
             
             method_used = "facial_recognition"
             if log_type == "Check-In":
+                self.pg_cursor.execute("""
+                   SELECT id FROM attendances
+                   WHERE employee_id = %s AND attendance_date = %s
+                """, (eid, now.date()))
+                if self.pg_cursor.fetchone():
+                    display(["ALREADY CHECKED", "IN TODAY"])
+                    print(f"[DUPLICATE] Check-in attempt for {name} already exists today.")
+                    return "duplicate"
+
                 clock_in_time = datetime.utcnow()
                 self.pg_cursor.execute("""
                     INSERT INTO attendances (employee_id, attendance_date, clock_in, method, created_at, updated_at)
                     VALUES (%s, %s, %s, %s, NOW(), NOW())
                 """, (eid, now.date(), clock_in_time, method_used))
-
+                
+                # Mark late if after 9:00 AM UTC
+                if clock_in_time.time() > datetime.strptime("09:00:00", "%H:%M:%S").time():
+                    self.pg_cursor.execute("""
+                        UPDATE attendances
+                        SET is_late = TRUE
+                        WHERE employee_id = %s AND attendance_date = %s
+                    """, (eid, now.date()))
+                
+            #check out function
             elif log_type == "Check-Out":
                 print(f"[INFO] Attempting Check-Out for {name}")
                 clock_out_time = datetime.utcnow()
                 
-                # Ensure there is a record to update
+                # locating a record to update
                 self.pg_cursor.execute("""
                     SELECT id FROM attendances 
                     WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
@@ -213,12 +230,12 @@ class AttendanceManager:
                 """, (eid, now.date()))
                 open_record = self.pg_cursor.fetchone()
                 if not open_record:
+                    display(["ALREADY", "CHECKED OUT"])
                     print("[ATTENDANCE] No open check-in found; clock-out failed.")
-                    display(["NO ACTIVE", "CHECK-IN FOUND"])
-                    return False
+                    return "duplicate"
                 print(f"[DEBUG] Targeting attendance ID {open_record[0]} for Check-Out")
-
-
+                
+                #clock out and total hours worked calculation
                 self.pg_cursor.execute("""
                     UPDATE attendances
                     SET clock_out = %s,
@@ -334,6 +351,40 @@ class AttendanceManager:
                   ON CONFLICT (employee_id, month, year) DO UPDATE
                   SET total_minutes = EXCLUDED.total_minutes
                """, (emp_id, month, year, secs // 60))
+               
+    def mark_daily_absentees(self):
+        if not self.db_online:
+            return
+        today = datetime.now().date()
+        
+        try:
+            # All active employee IDs
+            self.pg_cursor.execute("SELECT id FROM employees")
+            all_employees = set(row[0] for row in self.pg_cursor.fetchall())
+            
+            # Those who logged attendance today
+            self.pg_cursor.execute("""
+                SELECT DISTINCT employee_id
+                FROM attendances
+                WHERE attendance_date = %s
+            """, (today,))
+            present_employees = set(row[0] for row in self.pg_cursor.fetchall())
+            
+            # Absent ones = all - present
+            absent_employees = all_employees - present_employees
+
+            for eid in absent_employees:
+                self.pg_cursor.execute("""
+                    INSERT INTO attendances (employee_id, attendance_date, is_absent, created_at, updated_at)
+                    VALUES (%s, %s, TRUE, NOW(), NOW())
+                """, (eid, today))
+                
+            print(f"[ABSENT] Marked {len(absent_employees)} employees absent for {today}")
+        except Exception as e:
+            print(f"[ABSENT ERROR] {e}")
+
+    
+    
 
 CHECK_IN_PIN = 22
 CHECK_OUT_PIN = 23
@@ -422,11 +473,15 @@ def handle_attendance(mgr, action, headless=True):
         result = mgr.log_attendance(name, action)
         if result == "duplicate":
             display(["ALREADY", f"CHECKED {action}".upper()])
+            time.sleep(2)
+            display(get_greeting_lines())
+            transition_to("IDLE") 
+            print(f"[SKIP] Duplicate {action} attempt for {name}")
+            return
+        
         elif result:
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.HIGH)
             print(f"[LED] Lighting up {'GREEN' if action == 'Check-In' else 'RED'} for {action}")
-            
-            
             display([f"{name.split()[0].upper()} {action.upper()}", "SUCCESS!"])
             time.sleep(3)
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.LOW)
