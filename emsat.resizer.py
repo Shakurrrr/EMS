@@ -56,7 +56,7 @@ class AttendanceManager:
             if self.pg_conn:
                 self.pg_conn.close()
         except Exception:
-            pass  # Ignore errors if already closed
+            pass 
     
         try:
             self.pg_conn = psycopg2.connect(**POSTGRES_CONFIG)
@@ -77,7 +77,7 @@ class AttendanceManager:
         while True:
             if not self.db_online:
                 self.check_db_connection()
-            time.sleep(10)  # Retry every 10 seconds
+            time.sleep(10)
 
     def fetch_and_update_employees(self):
         global known_face_encodings, known_face_names
@@ -156,7 +156,7 @@ class AttendanceManager:
 
     def log_attendance(self, name, log_type):
         now = datetime.now()
-        if name in recent_logs and (now - recent_logs[name]).total_seconds() < 900:
+        if name in recent_logs and (now - recent_logs[name]).total_seconds() < 30:
             return "duplicate"
 
         if not self.db_online:
