@@ -17,6 +17,10 @@ from PIL import Image, ImageFile
 from picamera2 import Picamera2
 from RPLCD.i2c import CharLCD
 from apscheduler.schedulers.background import BackgroundScheduler
+from threading import Lock
+lcd_lock = Lock()
+last_greeting = None
+
 
 load_dotenv()
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -319,7 +323,9 @@ class AttendanceManager:
             print(f"[HOURS ERROR] {e}")
 
 
-    def update_weekly_hours(self):
+    def update_weekly_hours(self, reference_date=None):
+        if not self.db_online:
+            return
         today = datetime.now().date()
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)
@@ -335,7 +341,9 @@ class AttendanceManager:
                     SET total_minutes = EXCLUDED.total_minutes
                 """, (emp_id, week_number, year, secs // 60))
 
-    def update_monthly_hours(self):
+    def update_monthly_hours(self, reference_date=None):
+        if not self.db_online:
+            return
         today = datetime.now().date()
         start = today.replace(day=1)
         next_month = (start + timedelta(days=32)).replace(day=1)
@@ -352,10 +360,14 @@ class AttendanceManager:
                   SET total_minutes = EXCLUDED.total_minutes
                """, (emp_id, month, year, secs // 60))
                
-    def mark_daily_absentees(self):
+    def mark_daily_absentees(self, target_date=None):
         if not self.db_online:
             return
-        today = datetime.now().date()
+        today = datetime.now().date() if target_date is None else target_date
+        
+        if today.weekday() >= 5:  # Skip Saturday and Sunday
+            print(f"[ABSENT] Skipped absentee marking for weekend ({today})")
+            return
         
         try:
             # All active employee IDs
@@ -437,19 +449,30 @@ def recognize_face(timeout=15, headless=True):
     return None, None
 
 def display(lines, delay=0.3):
-    lcd.clear()
-    for line in lines:
-        if len(line) <= 16:
-            lcd.write_string(line.ljust(16))
-            lcd.crlf()
-        else:
-            for i in range(len(line)-15):
-                lcd.clear()
-                lcd.write_string(line[i:i+16])
+    with lcd_lock:
+        lcd.clear()
+        for line in lines:
+            if len(line) <= 16:
+                lcd.write_string(line.ljust(16))
                 lcd.crlf()
-                time.sleep(delay)
-            time.sleep(1)
+            else:
+                for i in range(len(line)-15):
+                    lcd.clear()
+                    lcd.write_string(line[i:i+16])
+                    lcd.crlf()
+                    time.sleep(delay)
+                time.sleep(1)
             
+
+def hourly_greeting_updater():
+    last_hour = -1
+    while True:
+        current_hour = datetime.now().hour
+        if current_hour != last_hour:
+            display(get_greeting_lines())
+            last_hour = current_hour
+        time.sleep(30)  # Poll every 30 seconds
+       
             
 def get_greeting_lines():
     hour = datetime.now().hour
@@ -499,13 +522,57 @@ def handle_attendance(mgr, action, headless=True):
 
 def main():
     mgr = AttendanceManager()
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+
+    # Only mark absentees for workdays
+    if yesterday.weekday() < 5:  # 0 = Monday, 6 = Sunday
+        try:
+            mgr.pg_cursor.execute("""
+                SELECT COUNT(*) FROM attendances
+                WHERE attendance_date = %s AND is_absent = TRUE
+            """, (yesterday,))
+            if mgr.pg_cursor.fetchone()[0] == 0:
+                mgr.mark_daily_absentees(yesterday)
+        except Exception as e:
+            print(f"[ABSENT FALLBACK ERROR] {e}")
+
+    # Weekly check fallback (if Monday)
+    if today.weekday() == 0:  # Monday
+        last_friday = today - timedelta(days=3)
+        try:
+            week_num = last_friday.isocalendar()[1]
+            mgr.pg_cursor.execute("""
+                SELECT COUNT(*) FROM weekly_attendance_logs
+                WHERE week = %s AND year = %s
+            """, (week_num, last_friday.year))
+            if mgr.pg_cursor.fetchone()[0] == 0:
+                mgr.update_weekly_hours(last_friday)
+        except Exception as e:
+            print(f"[WEEKLY FALLBACK ERROR] {e}")
+
+    # Monthly check fallback (if 1st of month)
+    if today.day == 1:
+        last_month = today.replace(day=1) - timedelta(days=1)
+        try:
+            mgr.pg_cursor.execute("""
+                SELECT COUNT(*) FROM monthly_attendance_logs
+                WHERE month = %s AND year = %s
+            """, (last_month.month, last_month.year))
+            if mgr.pg_cursor.fetchone()[0] == 0:
+                mgr.update_monthly_hours(last_month)
+        except Exception as e:
+            print(f"[MONTHLY FALLBACK ERROR] {e}")
     scheduler = BackgroundScheduler()
-    scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=2)
+    scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=5)
     scheduler.add_job(mgr.update_weekly_hours, 'cron', day_of_week='fri', hour=22, minute=0)
     scheduler.add_job(mgr.update_monthly_hours, 'cron', day='last', hour=22, minute=0)
+    scheduler.add_job(mgr.mark_daily_absentees, 'cron', hour=23, minute=59)
     scheduler.start()
 
     threading.Thread(target=mgr.fetch_and_update_employees, daemon=True).start()
+    threading.Thread(target=hourly_greeting_updater, daemon=True).start()
+
 
     display(get_greeting_lines())
     transition_to("IDLE")
