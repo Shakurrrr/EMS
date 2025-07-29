@@ -339,7 +339,7 @@ class AttendanceManager:
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (employee_id, week, year) DO UPDATE
                     SET total_minutes = EXCLUDED.total_minutes
-                """, (emp_id, week_number, year, secs // 60))
+                """, (emp_id, week_number, year, secs // 3600))
 
     def update_monthly_hours(self, reference_date=None):
         if not self.db_online:
@@ -358,7 +358,7 @@ class AttendanceManager:
                   VALUES (%s, %s, %s, %s)
                   ON CONFLICT (employee_id, month, year) DO UPDATE
                   SET total_minutes = EXCLUDED.total_minutes
-               """, (emp_id, month, year, secs // 60))
+               """, (emp_id, month, year, secs // 3600))
                
     def mark_daily_absentees(self, target_date=None):
         if not self.db_online:
@@ -563,6 +563,7 @@ def main():
                 mgr.update_monthly_hours(last_month)
         except Exception as e:
             print(f"[MONTHLY FALLBACK ERROR] {e}")
+            
     scheduler = BackgroundScheduler()
     scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=5)
     scheduler.add_job(mgr.update_weekly_hours, 'cron', day_of_week='fri', hour=22, minute=0)
