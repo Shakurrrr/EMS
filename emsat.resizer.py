@@ -17,6 +17,11 @@ from PIL import Image, ImageFile
 from picamera2 import Picamera2
 from RPLCD.i2c import CharLCD
 from apscheduler.schedulers.background import BackgroundScheduler
+from threading import Lock
+lcd_lock = Lock()
+last_greeting = None
+
+encoding_ready = threading.Event()
 
 load_dotenv()
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -51,6 +56,14 @@ class AttendanceManager:
 
     def check_db_connection(self):
         try:
+            if self.pg_cursor:
+                self.pg_cursor.close()
+            if self.pg_conn:
+                self.pg_conn.close()
+        except Exception:
+            pass 
+    
+        try:
             self.pg_conn = psycopg2.connect(**POSTGRES_CONFIG)
             self.pg_conn.autocommit = True
             self.pg_cursor = self.pg_conn.cursor()
@@ -63,13 +76,14 @@ class AttendanceManager:
         except Exception as e:
             if self.db_online:
                 print(f"[DB ERROR] Lost connection: {e}")
+                dsplay(["DB OFFLINE", "LOG QUEUED"])
             self.db_online = False
 
     def retry_connection_loop(self):
         while True:
             if not self.db_online:
                 self.check_db_connection()
-            time.sleep(10)  # Retry every 10 seconds
+            time.sleep(10)
 
     def fetch_and_update_employees(self):
         global known_face_encodings, known_face_names
@@ -81,6 +95,8 @@ class AttendanceManager:
                     known_face_encodings = data["encodings"]
                     known_face_names = data["names"]
                     print(f"[SYNC] Loaded {len(known_face_names)} faces from offline cache")
+                    encoding_ready.set()
+                    display(get_greeting_lines())
             else:
                 print("[SYNC] No offline data available (encodings.pickle missing)")
             return
@@ -102,12 +118,13 @@ class AttendanceManager:
 
                     buffer = BytesIO()
                     img.save(buffer, format='JPEG', quality=75)
-                    if buffer.tell() > 2_000_000:
-                        print(f"[SKIPPED] {name}: Image still exceeds 2MB after compression")
+                    if buffer.tell() > 3_000_000:
+                        print(f"[SKIPPED] {name}: Image still exceeds 3MB after compression")
                         continue
 
                     arr = np.array(img)
                     locs = face_recognition.face_locations(arr)
+                    print(f"[DEBUG] Processing {name}, URL: {url}, Face locations: {locs}")
                     encs = face_recognition.face_encodings(arr, locs)
                     if encs:
                         names.append(name)
@@ -119,6 +136,9 @@ class AttendanceManager:
             with open(ENCODINGS_FILE, "wb") as f:
                 pickle.dump({"encodings": encodings, "names": names}, f)
             print(f"[SYNC] Encoded {len(names)} employees")
+            encoding_ready.set()
+            display(get_greeting_lines())
+            
         except Exception as e:
             print(f"[DB] Sync error: {e}")
 
@@ -147,8 +167,6 @@ class AttendanceManager:
 
     def log_attendance(self, name, log_type):
         now = datetime.now()
-        if name in recent_logs and (now - recent_logs[name]).total_seconds() < 900:
-            return "duplicate"
 
         if not self.db_online:
             print("[ATTENDANCE] DB offline; queuing log")
@@ -175,32 +193,81 @@ class AttendanceManager:
         try:
             self.pg_cursor.execute("""
                 SELECT id FROM employees 
-                WHERE CONCAT(first_name, ' ', last_name) = %s LIMIT 1
+                WHERE LOWER(CONCAT(first_name, ' ', last_name)) = LOWER(%s)
+
             """, (name,))
             res = self.pg_cursor.fetchone()
             if not res:
+                print(f"[ERROR] No matching employee found for name: {name}")
                 return False
             eid = res[0]
-
+            
+            method_used = "facial_recognition"
             if log_type == "Check-In":
+                self.pg_cursor.execute("""
+                   SELECT id FROM attendances
+                   WHERE employee_id = %s AND attendance_date = %s
+                """, (eid, now.date()))
+                if self.pg_cursor.fetchone():
+                    display(["ALREADY CHECKED", "IN TODAY"])
+                    print(f"[DUPLICATE] Check-in attempt for {name} already exists today.")
+                    return "duplicate"
+
+                clock_in_time = datetime.utcnow()
                 self.pg_cursor.execute("""
                     INSERT INTO attendances (employee_id, attendance_date, clock_in, method, created_at, updated_at)
                     VALUES (%s, %s, %s, %s, NOW(), NOW())
-                """, (eid, now.date(), now.strftime("%H:%M:%S"), log_type))
-
+                """, (eid, now.date(), clock_in_time, method_used))
+                
+                # Mark late if after 9:00 AM UTC
+                if clock_in_time.time() > datetime.strptime("09:00:00", "%H:%M:%S").time():
+                    self.pg_cursor.execute("""
+                        UPDATE attendances
+                        SET is_late = TRUE
+                        WHERE employee_id = %s AND attendance_date = %s
+                    """, (eid, now.date()))
+                
+            #check out function
             elif log_type == "Check-Out":
+                print(f"[INFO] Attempting Check-Out for {name}")
+                clock_out_time = datetime.utcnow()
+                
+                # locating a record to update
+                self.pg_cursor.execute("""
+                    SELECT id FROM attendances 
+                    WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
+                    ORDER BY id DESC LIMIT 1
+                """, (eid, now.date()))
+                open_record = self.pg_cursor.fetchone()
+                if not open_record:
+                    display(["ALREADY", "CHECKED OUT"])
+                    print("[ATTENDANCE] No open check-in found; clock-out failed.")
+                    return "duplicate"
+                print(f"[DEBUG] Targeting attendance ID {open_record[0]} for Check-Out")
+                
+                #clock out and total hours worked calculation
                 self.pg_cursor.execute("""
                     UPDATE attendances
                     SET clock_out = %s,
-                        total_hours = EXTRACT(EPOCH FROM (%s::time - clock_in)) / 3600.0,
-                        updated_at = NOW(),
-                        method = %s
+                        total_hours = EXTRACT(EPOCH FROM (%s - clock_in)) / 3600.0,
+                        updated_at = NOW()
                     WHERE employee_id = %s AND attendance_date = %s AND clock_out IS NULL
-                """, (now.strftime("%H:%M:%S"), now.strftime("%H:%M:%S"), log_type, eid, now.date()))
-
-            self.pg_conn.commit()
+                """, (clock_out_time, clock_out_time, eid, now.date()))
+                print(f"Rows updated for clock_out: {self.pg_cursor.rowcount}")
+                print(f"[DEBUG] UPDATE ROWS AFFECTED: {self.pg_cursor.rowcount}")
+                
+                if self.pg_cursor.rowcount == 0:
+                    print("[ATTENDANCE] No open check-in found; clock-out failed.")
+                    display(["NO ACTIVE", "CHECK-IN FOUND"])
+                    return False
+                
+            print(f"[LOGGED] {log_type} for {name} (employee_id={eid})")
             recent_logs[name] = now
             return True
+        
+            print("[ERROR] Unknown log_type passed.")
+            return False
+
 
         except Exception as e:
             print(f"[ATTENDANCE ERROR] {e}")
@@ -227,6 +294,7 @@ class AttendanceManager:
             print(f"[EXPORT] Saved to {EXPORT_FILE}")
         except Exception as e:
             print(f"[EXPORT ERROR] {e}")
+
 
 
     def calculate_hours(self, start_date, end_date):
@@ -261,7 +329,9 @@ class AttendanceManager:
             print(f"[HOURS ERROR] {e}")
 
 
-    def update_weekly_hours(self):
+    def update_weekly_hours(self, reference_date=None):
+        if not self.db_online:
+            return
         today = datetime.now().date()
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)
@@ -271,13 +341,15 @@ class AttendanceManager:
                 week_number = start.isocalendar()[1]
                 year = start.year
                 self.pg_cursor.execute("""
-                    INSERT INTO weekly_attendance_logs (employee_id, week, year, total_minutes)
+                    INSERT INTO weekly_attendance_logs (employee_id, week, year, total_hours)
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (employee_id, week, year) DO UPDATE
                     SET total_minutes = EXCLUDED.total_minutes
-                """, (emp_id, week_number, year, secs // 60))
+                """, (emp_id, week_number, year, secs // 3600))
 
-    def update_monthly_hours(self):
+    def update_monthly_hours(self, reference_date=None):
+        if not self.db_online:
+            return
         today = datetime.now().date()
         start = today.replace(day=1)
         next_month = (start + timedelta(days=32)).replace(day=1)
@@ -288,11 +360,49 @@ class AttendanceManager:
                month = start.month
                year = start.year
                self.pg_cursor.execute("""
-                  INSERT INTO monthly_attendance_logs (employee_id, month, year, total_minutes)
+                  INSERT INTO monthly_attendance_logs (employee_id, month, year, total_hours)
                   VALUES (%s, %s, %s, %s)
                   ON CONFLICT (employee_id, month, year) DO UPDATE
-                  SET total_minutes = EXCLUDED.total_minutes
-               """, (emp_id, month, year, secs // 60))
+                  SET total_hours = EXCLUDED.total_hours
+               """, (emp_id, month, year, secs // 3600))
+               
+    def mark_daily_absentees(self, target_date=None):
+        if not self.db_online:
+            return
+        today = datetime.now().date() if target_date is None else target_date
+        
+        if today.weekday() >= 5:  # Skip Saturday and Sunday
+            print(f"[ABSENT] Skipped absentee marking for weekend ({today})")
+            return
+        
+        try:
+            # All active employee IDs
+            self.pg_cursor.execute("SELECT id FROM employees")
+            all_employees = set(row[0] for row in self.pg_cursor.fetchall())
+            
+            # Those who logged attendance today
+            self.pg_cursor.execute("""
+                SELECT DISTINCT employee_id
+                FROM attendances
+                WHERE attendance_date = %s
+            """, (today,))
+            present_employees = set(row[0] for row in self.pg_cursor.fetchall())
+            
+            # Absent ones = all - present
+            absent_employees = all_employees - present_employees
+
+            for eid in absent_employees:
+                self.pg_cursor.execute("""
+                    INSERT INTO attendances (employee_id, attendance_date, is_absent, created_at, updated_at)
+                    VALUES (%s, %s, TRUE, NOW(), NOW())
+                """, (eid, today))
+                
+            print(f"[ABSENT] Marked {len(absent_employees)} employees absent for {today}")
+        except Exception as e:
+            print(f"[ABSENT ERROR] {e}")
+
+    
+    
 
 CHECK_IN_PIN = 22
 CHECK_OUT_PIN = 23
@@ -312,9 +422,9 @@ picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888',
 picam2.start()
 
 def transition_to(state):
-    print(f"[FSM] → {state}")
+    print(f"[FSM] â†’ {state}")
 
-def recognize_face(timeout=15, headless=False):
+def recognize_face(timeout=15, headless=True):
     start = time.time()
     while time.time() - start < timeout:
         frame = picam2.capture_array()
@@ -345,31 +455,63 @@ def recognize_face(timeout=15, headless=False):
     return None, None
 
 def display(lines, delay=0.3):
-    lcd.clear()
-    for line in lines:
-        if len(line) <= 16:
-            lcd.write_string(line.ljust(16))
-            lcd.crlf()
-        else:
-            for i in range(len(line)-15):
-                lcd.clear()
-                lcd.write_string(line[i:i+16])
+    with lcd_lock:
+        lcd.clear()
+        for line in lines:
+            if len(line) <= 16:
+                lcd.write_string(line.ljust(16))
                 lcd.crlf()
-                time.sleep(delay)
-            time.sleep(1)
+            else:
+                for i in range(len(line)-15):
+                    lcd.clear()
+                    lcd.write_string(line[i:i+16])
+                    lcd.crlf()
+                    time.sleep(delay)
+                time.sleep(1)
+            
 
-def handle_attendance(mgr, action, headless=False):
+def hourly_greeting_updater():
+    last_hour = -1
+    while True:
+        current_hour = datetime.now().hour
+        if current_hour != last_hour:
+            display(get_greeting_lines())
+            last_hour = current_hour
+        time.sleep(30)  # Poll every 30 seconds
+       
+            
+def get_greeting_lines():
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return ["GOOD MORNING!", "PRESS TO LOG"]
+    elif 12 <= hour < 17:
+        return ["GOOD AFTERNOON!", "PRESS TO LOG"]
+    elif 17 <= hour < 21:
+        return ["GOOD EVENING!", "PRESS TO LOG"]
+    else:
+        return ["WELCOME BACK!", "PRESS TO LOG"]
+                    
+
+def handle_attendance(mgr, action, headless=True):
+    print(f"[DEBUG] Button triggered action: {action}")
     display(["LOOK AT THE CAMERA"])
     name, confidence = recognize_face(headless=headless)
     if name:
-        display([f"DETECTED: {name}", f"MATCH: {confidence}%"])
+        display([f"DETECTED: {name.upper()}", f"MATCH: {confidence}%"])
         time.sleep(1.5)
         result = mgr.log_attendance(name, action)
         if result == "duplicate":
-            display(["ALREADY", f"CHECKED {action}".lower()])
+            display(["ALREADY", f"CHECKED {action}".upper()])
+            time.sleep(2)
+            display(get_greeting_lines())
+            transition_to("IDLE") 
+            print(f"[SKIP] Duplicate {action} attempt for {name}")
+            return
+        
         elif result:
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.HIGH)
-            display([f"{name.split()[0]} {action}", "Success!"])
+            print(f"[LED] Lighting up {'GREEN' if action == 'Check-In' else 'RED'} for {action}")
+            display([f"{name.split()[0].upper()} {action.upper()}", "SUCCESS!"])
             time.sleep(3)
             GPIO.output(GREEN_LED_PIN if action == "Check-In" else RED_LED_PIN, GPIO.LOW)
         else:
@@ -378,20 +520,68 @@ def handle_attendance(mgr, action, headless=False):
         display(["FACE NOT", "RECOGNIZED"])
     time.sleep(2)
 
+    display(get_greeting_lines())
+    transition_to("IDLE")
+
+    
     ##system FSM
 
 def main():
     mgr = AttendanceManager()
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+
+    # Only mark absentees for workdays
+    if yesterday.weekday() < 5:  # 0 = Monday, 6 = Sunday
+        try:
+            mgr.pg_cursor.execute("""
+                SELECT COUNT(*) FROM attendances
+                WHERE attendance_date = %s AND is_absent = TRUE
+            """, (yesterday,))
+            if mgr.pg_cursor.fetchone()[0] == 0:
+                mgr.mark_daily_absentees(yesterday)
+        except Exception as e:
+            print(f"[ABSENT FALLBACK ERROR] {e}")
+
+    # Weekly check fallback (if Monday)
+    if today.weekday() == 0:  # Monday
+        last_friday = today - timedelta(days=3)
+        try:
+            week_num = last_friday.isocalendar()[1]
+            mgr.pg_cursor.execute("""
+                SELECT COUNT(*) FROM weekly_attendance_logs
+                WHERE week = %s AND year = %s
+            """, (week_num, last_friday.year))
+            if mgr.pg_cursor.fetchone()[0] == 0:
+                mgr.update_weekly_hours(last_friday)
+        except Exception as e:
+            print(f"[WEEKLY FALLBACK ERROR] {e}")
+
+    # Monthly check fallback (if 1st of month)
+    if today.day == 1:
+        last_month = today.replace(day=1) - timedelta(days=1)
+        try:
+            mgr.pg_cursor.execute("""
+                SELECT COUNT(*) FROM monthly_attendance_logs
+                WHERE month = %s AND year = %s
+            """, (last_month.month, last_month.year))
+            if mgr.pg_cursor.fetchone()[0] == 0:
+                mgr.update_monthly_hours(last_month)
+        except Exception as e:
+            print(f"[MONTHLY FALLBACK ERROR] {e}")
     scheduler = BackgroundScheduler()
     scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=5)
     scheduler.add_job(mgr.update_weekly_hours, 'cron', day_of_week='fri', hour=22, minute=0)
     scheduler.add_job(mgr.update_monthly_hours, 'cron', day='last', hour=22, minute=0)
+    scheduler.add_job(mgr.mark_daily_absentees, 'cron', hour=23, minute=59)
     scheduler.start()
 
     threading.Thread(target=mgr.fetch_and_update_employees, daemon=True).start()
+    threading.Thread(target=lambda: (encoding_ready.wait(), hourly_greeting_updater()), daemon=True).start()
 
-    display(["SYSTEM READY", "PRESS BUTTON"])
-    transition_to("IDLE")
+
+
+    
     try:
         while True:
             if GPIO.input(CHECK_IN_PIN) == GPIO.LOW:
@@ -399,6 +589,7 @@ def main():
                 handle_attendance(mgr, "Check-In")
                 transition_to("IDLE")
             elif GPIO.input(CHECK_OUT_PIN) == GPIO.LOW:
+                print("Check-Out button pressed")
                 transition_to("RECOGNIZING")
                 handle_attendance(mgr, "Check-Out")
                 transition_to("IDLE")
