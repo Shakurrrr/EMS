@@ -21,6 +21,7 @@ from threading import Lock
 lcd_lock = Lock()
 last_greeting = None
 
+encoding_ready = threading.Event()
 
 load_dotenv()
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -94,6 +95,8 @@ class AttendanceManager:
                     known_face_encodings = data["encodings"]
                     known_face_names = data["names"]
                     print(f"[SYNC] Loaded {len(known_face_names)} faces from offline cache")
+                    encoding_ready.set()
+                    display(get_greeting_lines())
             else:
                 print("[SYNC] No offline data available (encodings.pickle missing)")
             return
@@ -133,6 +136,9 @@ class AttendanceManager:
             with open(ENCODINGS_FILE, "wb") as f:
                 pickle.dump({"encodings": encodings, "names": names}, f)
             print(f"[SYNC] Encoded {len(names)} employees")
+            encoding_ready.set()
+            display(get_greeting_lines())
+            
         except Exception as e:
             print(f"[DB] Sync error: {e}")
 
@@ -335,7 +341,7 @@ class AttendanceManager:
                 week_number = start.isocalendar()[1]
                 year = start.year
                 self.pg_cursor.execute("""
-                    INSERT INTO weekly_attendance_logs (employee_id, week, year, total_minutes)
+                    INSERT INTO weekly_attendance_logs (employee_id, week, year, total_hours)
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (employee_id, week, year) DO UPDATE
                     SET total_minutes = EXCLUDED.total_minutes
@@ -354,10 +360,10 @@ class AttendanceManager:
                month = start.month
                year = start.year
                self.pg_cursor.execute("""
-                  INSERT INTO monthly_attendance_logs (employee_id, month, year, total_minutes)
+                  INSERT INTO monthly_attendance_logs (employee_id, month, year, total_hours)
                   VALUES (%s, %s, %s, %s)
                   ON CONFLICT (employee_id, month, year) DO UPDATE
-                  SET total_minutes = EXCLUDED.total_minutes
+                  SET total_hours = EXCLUDED.total_hours
                """, (emp_id, month, year, secs // 3600))
                
     def mark_daily_absentees(self, target_date=None):
@@ -416,7 +422,7 @@ picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888',
 picam2.start()
 
 def transition_to(state):
-    print(f"[FSM] → {state}")
+    print(f"[FSM] â†’ {state}")
 
 def recognize_face(timeout=15, headless=True):
     start = time.time()
@@ -563,7 +569,6 @@ def main():
                 mgr.update_monthly_hours(last_month)
         except Exception as e:
             print(f"[MONTHLY FALLBACK ERROR] {e}")
-            
     scheduler = BackgroundScheduler()
     scheduler.add_job(mgr.fetch_and_update_employees, 'interval', minutes=5)
     scheduler.add_job(mgr.update_weekly_hours, 'cron', day_of_week='fri', hour=22, minute=0)
@@ -572,11 +577,11 @@ def main():
     scheduler.start()
 
     threading.Thread(target=mgr.fetch_and_update_employees, daemon=True).start()
-    threading.Thread(target=hourly_greeting_updater, daemon=True).start()
+    threading.Thread(target=lambda: (encoding_ready.wait(), hourly_greeting_updater()), daemon=True).start()
 
 
-    display(get_greeting_lines())
-    transition_to("IDLE")
+
+    
     try:
         while True:
             if GPIO.input(CHECK_IN_PIN) == GPIO.LOW:
@@ -597,5 +602,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
