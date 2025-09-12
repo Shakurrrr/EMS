@@ -6,6 +6,7 @@ import pickle
 import threading
 import json
 from datetime import datetime, timedelta, timezone, date, time as dtime
+
 import RPi.GPIO as GPIO
 import numpy as np
 import pandas as pd
@@ -53,7 +54,7 @@ DAILY_PDF_COLUMNS = [
 ]
 
 # -------------------- Timezone/Business Rules --------------------
-TZ = timezone(timedelta(hours=1))  # Africa/Lagos
+TZ = timezone(timedelta(hours=1))  # Africa/Lagos (fixed offset)
 LATE_CUTOFF = dtime(9, 0, 0)       # 09:00 local
 METHOD_USED = "facial_recognition"
 
@@ -70,7 +71,8 @@ GPIO.setup(RED_LED_PIN, GPIO.OUT)
 GPIO.output(GREEN_LED_PIN, GPIO.LOW)
 GPIO.output(RED_LED_PIN, GPIO.LOW)
 
-lcd = CharLCD('PCF8574', 0x27)  # change to 0x3F if your i2c address differs
+# NOTE: keep address explicit to avoid surprises; if your LCD uses 0x3F, change it below.
+lcd = CharLCD('PCF8574', 0x27)
 picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
 picam2.start()
@@ -603,7 +605,7 @@ def display(lines, delay=0.3):
                 time.sleep(1)
 
 def get_greeting_lines():
-    hour = datetime.now().hour
+    hour = _now().hour
     if 5 <= hour < 12:
         return ["GOOD MORNING!", "PRESS TO LOG"]
     elif 12 <= hour < 17:
@@ -616,14 +618,14 @@ def get_greeting_lines():
 def hourly_greeting_updater():
     last_hour = -1
     while True:
-        current_hour = datetime.now().hour
+        current_hour = _now().hour
         if current_hour != last_hour:
             display(get_greeting_lines())
             last_hour = current_hour
         time.sleep(30)
 
 # -------------------- Button Handlers --------------------
-def handle_attendance(mgr: LocalAttendanceManager, action: str, headless=True):
+def handle_attendance(mgr: 'LocalAttendanceManager', action: str, headless=True):
     print(f"[DEBUG] Button triggered action: {action}")
     display(["LOOK AT THE CAMERA"])
     eid, full_name, confidence = recognize_face(headless=headless)
@@ -677,6 +679,14 @@ def _backfill_monthly_if_missing(mgr: 'LocalAttendanceManager'):
         print("[BACKFILL] Monthly report missing; generating now.")
         mgr.export_monthly(y, m, to_csv=True, to_pdf=True)
 
+# -------------------- Minimal freeze-proofing --------------------
+def _clock_sane(min_year: int = 2020) -> bool:
+    """True if system clock looks reasonable (avoids APS catch-up storms on 1970 time)."""
+    try:
+        return _now().year >= min_year
+    except Exception:
+        return False
+
 # -------------------- Main --------------------
 def main():
     mgr = LocalAttendanceManager()
@@ -684,40 +694,54 @@ def main():
     # Encodings: load cache or build from local employee folders
     load_encodings_from_cache_or_build()
 
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(build_or_load_encodings, 'interval', minutes=10)
+    # Make scheduler timezone-aware and resilient to misfires.
+    scheduler = BackgroundScheduler(
+        timezone=TZ,
+        job_defaults={
+            "coalesce": True,
+            "misfire_grace_time": 3600  # 1 hour; prevents massive catch-up on wrong clocks
+        }
+    )
 
-    # On-time schedules
-    scheduler.add_job(lambda: mgr.export_weekly(to_csv=True, to_pdf=True),
-                      'cron', day_of_week='fri', hour=22, minute=0)
-    scheduler.add_job(lambda: mgr.export_monthly(_today().year, _today().month, to_csv=True, to_pdf=True),
-                      'cron', day='last', hour=22, minute=0)
+    # Only register and start scheduled jobs if the clock is sane.
+    if _clock_sane():
+        # Periodic refresh of encodings
+        scheduler.add_job(build_or_load_encodings, 'interval', minutes=10)
 
-    # Catch-up schedules if Pi was off
-    scheduler.add_job(lambda: mgr.export_weekly(any_day=_today() - timedelta(days=3), to_csv=True, to_pdf=True),
-                      'cron', day_of_week='mon', hour=8, minute=0)
-    scheduler.add_job(
-        lambda: (lambda pm=(_today().replace(day=1) - timedelta(days=1)):
-                 mgr.export_monthly(pm.year, pm.month, to_csv=True, to_pdf=True))(),
-        'cron', day=1, hour=8, minute=0)
+        # On-time schedules
+        scheduler.add_job(lambda: mgr.export_weekly(to_csv=True, to_pdf=True),
+                          'cron', day_of_week='fri', hour=22, minute=0)
+        scheduler.add_job(lambda: mgr.export_monthly(_today().year, _today().month, to_csv=True, to_pdf=True),
+                          'cron', day='last', hour=22, minute=0)
 
-    # Daily absent marking & day file bootstrap
-    def _mark_absents():
-        if not os.path.isdir(EMPLOYEES_ROOT):
-            return
-        all_ids = [d for d in os.listdir(EMPLOYEES_ROOT)
-                   if os.path.isdir(os.path.join(EMPLOYEES_ROOT, d))]
-        mgr.mark_daily_absentees(all_ids, _today())
-    scheduler.add_job(_mark_absents, 'cron', hour=23, minute=59)
+        # Catch-up schedules if Pi was off
+        scheduler.add_job(lambda: mgr.export_weekly(any_day=_today() - timedelta(days=3), to_csv=True, to_pdf=True),
+                          'cron', day_of_week='mon', hour=8, minute=0)
+        scheduler.add_job(
+            lambda: (lambda pm=(_today().replace(day=1) - timedelta(days=1)):
+                     mgr.export_monthly(pm.year, pm.month, to_csv=True, to_pdf=True))(),
+            'cron', day=1, hour=8, minute=0)
 
-    _init_today_artifacts()
-    scheduler.add_job(lambda: _ensure_daily_artifacts(_today()), 'cron', hour=0, minute=1)
+        # Daily absent marking & day file bootstrap
+        def _mark_absents():
+            if not os.path.isdir(EMPLOYEES_ROOT):
+                return
+            all_ids = [d for d in os.listdir(EMPLOYEES_ROOT)
+                       if os.path.isdir(os.path.join(EMPLOYEES_ROOT, d))]
+            mgr.mark_daily_absentees(all_ids, _today())
+        scheduler.add_job(_mark_absents, 'cron', hour=23, minute=59)
 
-    # One-time backfill at boot
-    _backfill_weekly_if_missing(mgr)
-    _backfill_monthly_if_missing(mgr)
+        # Bootstrap & daily artifact ensure
+        _init_today_artifacts()
+        scheduler.add_job(lambda: _ensure_daily_artifacts(_today()), 'cron', hour=0, minute=1)
 
-    scheduler.start()
+        try:
+            scheduler.start()
+        except Exception as e:
+            print(f"[SCHED] start failed: {e}. Continuing without scheduler.")
+    else:
+        print("[SCHED] System clock not sane; running attendance loop without scheduler jobs.")
+        _init_today_artifacts()
 
     # LCD greeting thread after encodings are ready
     threading.Thread(target=lambda: (encoding_ready.wait(), hourly_greeting_updater()), daemon=True).start()
