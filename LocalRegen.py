@@ -749,7 +749,7 @@ def hourly_greeting_updater():
 # -------------------- Scheduler job registration --------------------
 def _register_scheduler_jobs(scheduler, mgr):
     # periodic encodings refresh
-    scheduler.add_job(build_or_load_encodings, 'interval', minutes=10)
+    scheduler.add_job(build_or_load_encodings, 'interval', minutes=30)
 
     # on-time schedules (Friday 22:00)
     scheduler.add_job(lambda: mgr.export_weekly(to_csv=True, to_pdf=True),
@@ -1048,9 +1048,11 @@ def main():
         except Exception as e:
             print(f"[SCHED] start failed: {e}. Continuing without scheduler.")
         _init_today_artifacts()
+        _regen_recent_days(n=3)
     else:
         print("[SCHED] System clock not sane; running attendance loop without scheduler jobs.")
         _init_today_artifacts()
+        _regen_recent_days(n=3)
 
     # One-time backfill at boot (safe regardless of scheduler)
     _backfill_weekly_if_missing(mgr)
