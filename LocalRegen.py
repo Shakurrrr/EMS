@@ -41,7 +41,7 @@ known_face_names = []          # full_name (spaces)
 known_face_ids = []            # employee_id (folder name)
 
 # Tuned for stricter but still responsive recognition
-TOLERANCE = 0.41               # lower => stricter (0.35–0.45 typical)
+TOLERANCE = 0.41               # lower => stricter (0.35Â–0.45 typical)
 SECOND_BEST_MARGIN = 0.05      # best must beat 2nd-best *other person* by this much
 MATCH_STREAK = 2               # frames needed to lock the same person
 MAX_FRAMES = 20                # cap per recognition attempt
@@ -475,7 +475,7 @@ def _write_weekly_pdf(path: str, logs_df: pd.DataFrame, summary_df: pd.DataFrame
     os.replace(tmp_path, path)
     print(f"[EXPORT] Weekly PDF -> {path}")
 
-# ---- PDF writer (weekly/monthly generic) ----
+# ---- PDF writer (weekly/monthly generic, legacy) ----
 def _write_pdf(path: str, df: pd.DataFrame, title: str):
     try:
         from reportlab.lib.pagesizes import A4, landscape
@@ -550,6 +550,77 @@ def _write_pdf(path: str, df: pd.DataFrame, title: str):
     doc.build(content)
     os.replace(tmp_path, path)
     print(f"[EXPORT] PDF -> {path}")
+
+# -------------------- MONTHLY SUMMARY (NEW) --------------------
+def _monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse a month's daily rows into one line per employee with total hours.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["full_name", "month_total_hours"])
+
+    tmp = df.copy()
+    tmp["full_name"] = tmp["full_name"].fillna("").astype(str)
+    tmp["total_hours"] = pd.to_numeric(tmp["total_hours"], errors="coerce").fillna(0.0)
+
+    summary = tmp.groupby("full_name", as_index=False)["total_hours"].sum()
+    summary = summary.rename(columns={"total_hours": "month_total_hours"})
+    summary["month_total_hours"] = summary["month_total_hours"].round(2)
+
+    return summary.sort_values("full_name").reset_index(drop=True)
+
+def _write_monthly_summary_pdf(path: str, summary_df: pd.DataFrame, title: str):
+    """
+    Render a compact monthly summary-only PDF: Full Name | Month Total (h)
+    """
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+    except ImportError:
+        print("[WARN] reportlab not installed. Skipping monthly PDF export.")
+        return
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = path + ".tmp"
+
+    styles = getSampleStyleSheet()
+    styles["BodyText"].fontSize = 10
+    styles["BodyText"].leading = 12
+
+    doc = SimpleDocTemplate(
+        tmp_path,
+        pagesize=landscape(A4),
+        leftMargin=18, rightMargin=18, topMargin=24, bottomMargin=18,
+        title=title
+    )
+
+    content = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
+
+    header = [
+        Paragraph("Full Name", styles["BodyText"]),
+        Paragraph("Month Total (h)", styles["BodyText"]),
+    ]
+    body = [
+        [Paragraph(str(r["full_name"]), styles["BodyText"]),
+         Paragraph(f"{float(r['month_total_hours']):.2f}", styles["BodyText"])]
+        for _, r in summary_df.iterrows()
+    ]
+
+    tbl = Table([header] + body, repeatRows=1, hAlign="LEFT")
+    tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+    ]))
+
+    content.append(tbl)
+    doc.build(content)
+    os.replace(tmp_path, path)
+    print(f"[EXPORT] Monthly Summary PDF -> {path}")
 
 # -------------------- Employees & Encodings --------------------
 id_to_encoding = {}   # str(employee_id) -> np.ndarray
@@ -749,7 +820,7 @@ def hourly_greeting_updater():
 # -------------------- Scheduler job registration --------------------
 def _register_scheduler_jobs(scheduler, mgr):
     # periodic encodings refresh
-    scheduler.add_job(build_or_load_encodings, 'interval', minutes=30)
+    scheduler.add_job(build_or_load_encodings, 'interval', minutes=120)
 
     # on-time schedules (Friday 22:00)
     scheduler.add_job(lambda: mgr.export_weekly(to_csv=True, to_pdf=True),
@@ -797,7 +868,7 @@ class LocalAttendanceManager:
     - Duplicate protection
     - Late flag on check-in after 09:00
     - total_hours = (clock_out - clock_in) in hours (2 d.p.)
-    - Weekly & Monthly exports (CSV + PDF with weekly summary)
+    - Weekly & Monthly exports (CSV + PDF)
     - Optional daily absentees (is_absent=TRUE)
     """
     def __init__(self):
@@ -953,12 +1024,17 @@ class LocalAttendanceManager:
         frames = [_read_daily(start + timedelta(days=i)) for i in range(days)]
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=DAILY_HEADERS)
 
+        # ---- NEW: summary-only for the monthly report
+        summary_df = _monthly_summary(df)
+
         base = os.path.join(REPORTS_DIR, f"monthly_{year}-{month:02d}")
         if to_csv:
+            # Optional: keep both raw month and summary CSVs
             df.to_csv(base + ".csv", index=False)
-            print(f"[EXPORT] CSV -> {base}.csv")
+            summary_df.to_csv(base + "_summary.csv", index=False)
+            print(f"[EXPORT] CSV -> {base}.csv ; {base}_summary.csv")
         if to_pdf:
-            _write_pdf(base + ".pdf", df, title=f"Monthly Report {year}-{month:02d}")
+            _write_monthly_summary_pdf(base + ".pdf", summary_df, title=f"Monthly Summary {year}-{month:02d}")
 
 # -------------------- Backfill helpers --------------------
 def _weekly_expected_paths(any_day: date):
@@ -987,7 +1063,8 @@ def _backfill_monthly_if_missing(mgr: 'LocalAttendanceManager'):
         mgr.export_monthly(y, m, to_csv=True, to_pdf=True)
 
 def recalc_and_regen_day(target_date: date):
-    """Recompute totals from CSV for a given day and rebuild that day's PDF."""
+    """Recompute totals from CSV for a given day and rebuild that day's PDF.
+       Also refresh the week that contains that day."""
     _ensure_daily_file(target_date)
     df = _read_daily(target_date)
 
@@ -1006,6 +1083,13 @@ def recalc_and_regen_day(target_date: date):
 
     _write_daily(target_date, df)  # writes CSV + PDF
 
+    try:
+        mgr = _GLOBAL_MGR or LocalAttendanceManager()
+        mgr.export_weekly(any_day=target_date, to_csv=True, to_pdf=True)
+        print(f"[WEEKLY] Regen because {target_date} changed.")
+    except Exception as e:
+        print(f"[WEEKLY] Regen failed for {target_date}: {e}")
+
 def _regen_recent_days(n=3):
     for i in range(1, n+1):
         try:
@@ -1017,7 +1101,6 @@ def _regen_recent_days(n=3):
                 recalc_and_regen_day(d)
         except Exception as e:
             print(f"[REGEN] Failed for {d}: {e}")
-
 
 # -------------------- Main --------------------
 def main():
