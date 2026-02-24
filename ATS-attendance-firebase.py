@@ -341,6 +341,19 @@ def _init_today_artifacts():
         _ensure_daily_artifacts(_today())
     except Exception as e:
         print(f"[INIT] Failed to ensure today's artifacts: {e}")
+        
+        
+def firebase_bucket_probe():
+    """Checks the bucket exists and is reachable with this service account."""
+    try:
+        b = storage.bucket(FIREBASE_BUCKET)
+        # A lightweight call that validates bucket access
+        _ = b.exists()
+        print(f"[FIREBASE] Bucket reachable: {b.name}")
+        return True
+    except Exception as e:
+        print(f"[FIREBASE] Bucket probe failed: {e}")
+        return False
 
 # -------------------- Time Repair Logic --------------------
 def _monotonic_to_wall(mono_ns_str: str):
@@ -1254,6 +1267,7 @@ def main():
     _GLOBAL_MGR = mgr
     
     firebase_init()
+    firebase_bucket_probe()
 
     # Encodings: load cache or build from local employee folders
     load_encodings_from_cache_or_build()
