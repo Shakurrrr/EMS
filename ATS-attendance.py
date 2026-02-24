@@ -5,8 +5,6 @@ import time
 import pickle
 import threading
 from datetime import datetime, timedelta, timezone, date, time as dtime
-import firebase_admin
-from firebase_admin import credentials, storage
 import RPi.GPIO as GPIO
 import numpy as np
 import pandas as pd
