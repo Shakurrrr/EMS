@@ -72,6 +72,11 @@ def firebase_upload_pdf(local_path: str, storage_path: str):
     blob.upload_from_filename(local_path, content_type="application/pdf")
     print(f"[FIREBASE] Uploaded -> gs://{FIREBASE_BUCKET}/{storage_path}")
 
+    # Get the download URL
+    download_url = blob.generate_signed_url(expiration=timedelta(hours=1), method="GET")
+    print(f"[FIREBASE] Download URL: {download_url}")
+    return download_url  # Return the URL after upload
+
 # -------------------- Recognition Config --------------------
 cv_scaler = 2
 known_face_encodings = []
