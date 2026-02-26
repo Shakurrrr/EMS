@@ -39,7 +39,7 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 FIREBASE_ENABLED = True  # set False if you want to disable uploads quickly
 
 SERVICE_ACCOUNT = os.path.join(BASE_DIR, "firebase", "serviceAccountKey.json")
-FIREBASE_BUCKET = "attendance-90752.appspot.com"  # confirm in Firebase Console -> Storage
+FIREBASE_BUCKET = "attendance-90752.firebasestorage.app"  # 
 
 _firebase_inited = False
 
