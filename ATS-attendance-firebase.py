@@ -884,7 +884,7 @@ def upload_daily_report_to_firebase(target_day: date = None):
         firebase_upload_pdf(local_pdf, storage_path)
     except Exception as e:
         print(f"[FIREBASE] Daily scheduled upload failed: {e}")
-
+    
 def upload_weekly_report_to_firebase(any_day: date = None):
     """Uploads weekly_YYYY-WW.pdf to Firebase Storage once at 7PM Friday."""
     try:
@@ -912,7 +912,12 @@ def _register_scheduler_jobs(scheduler, mgr):
                       'cron', day_of_week='fri', hour=18, minute=55)
     scheduler.add_job(lambda: mgr.export_monthly(_today().year, _today().month, to_csv=True, to_pdf=True),
                       'cron', day='last', hour=22, minute=0)
-                      
+
+            # 6:00 PM -> close TODAY's open rows, but set clock_out to 5:00 PM (AUTOCLOSE_CUTOFF)
+    scheduler.add_job(lambda: mgr.autoclose_today(cutoff=AUTOCLOSE_CUTOFF),
+                  'cron', hour=18, minute=0)
+    
+             # 6:58 PM -> rebuild today's CSV/PDF         
     scheduler.add_job(lambda: _ensure_daily_artifacts(_today()),
                       'cron', hour=18, minute=58)
     
@@ -1118,6 +1123,12 @@ class LocalAttendanceManager:
 
         print(f"[AUTOCLOSE] Closed {updates} open row(s) for {target_date}")
         return updates
+
+    #---------------------Current Day Auto_close-----------------
+    def autoclose_today(self, cutoff: dtime = AUTOCLOSE_CUTOFF) -> int:
+        """Auto-close open rows for today using the cutoff time."""
+        return self.autoclose_for_day(_today(), cutoff_time=cutoff)
+        
 
     def autoclose_previous_day(self, cutoff: dtime = AUTOCLOSE_CUTOFF) -> int:
         """Convenience wrapper to auto-close the previous calendar day."""
