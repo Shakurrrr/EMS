@@ -939,7 +939,7 @@ def _register_scheduler_jobs(scheduler, mgr):
                    if os.path.isdir(os.path.join(EMPLOYEES_ROOT, d))]
         if all_ids:
             mgr.mark_daily_absentees(all_ids, _today())
-    scheduler.add_job(_mark_absents, 'cron', hour=23, minute=59)
+    scheduler.add_job(_mark_absents, 'cron', hour=18, minute=45)
 
     # daily artifact ensure
     scheduler.add_job(lambda: _ensure_daily_artifacts(_today()), 'cron', hour=0, minute=1)
